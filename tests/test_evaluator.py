@@ -4,8 +4,8 @@ from typing import Any, Dict, List, Tuple
 import pytest
 
 # Import the modules under test
-from LLD.evaluator import DesignEvaluator
-from LLD.models import ClassDesign
+from LLD.core.evaluator import DesignEvaluator
+from LLD.core.models import ClassDesign
 
 
 # ---------------------------------------------------------------------------

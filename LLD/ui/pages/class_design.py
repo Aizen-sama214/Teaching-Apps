@@ -1,7 +1,9 @@
 """Class Design step page."""
 
 import streamlit as st
-from LLD.models import ClassDesign
+
+from LLD.core.models import ClassDesign
+from LLD.persistence import database as db_helpers
 
 
 def render() -> None:
@@ -10,6 +12,15 @@ def render() -> None:
         st.stop()
 
     st.markdown('<div class="section-header">🎨 Class Design Phase</div>', unsafe_allow_html=True)
+
+    # Refresh class designs & evaluations from DB when switching to this page
+    if st.session_state.get("current_problem"):
+        st.session_state.class_designs = db_helpers.fetch_class_designs(
+            st.session_state.current_problem
+        )
+        st.session_state.evaluations = db_helpers.fetch_evaluations(
+            st.session_state.current_problem
+        )
 
     # Force sections to stack vertically (override any global flex/grid)
     st.markdown(
@@ -108,6 +119,9 @@ def render() -> None:
                     relationships=[r.strip() for r in relationships.split("\n") if r.strip()],
                 )
                 st.session_state.class_designs[class_name] = class_design
+                # Persist to DB
+                if st.session_state.get("current_problem"):
+                    db_helpers.save_class_design(st.session_state.current_problem, class_design)
                 st.success(f"Class '{class_name}' saved successfully!")
                 st.rerun()
 
@@ -118,48 +132,56 @@ def render() -> None:
     with eval_col:
         st.markdown("### 📊 Design Evaluation")
         if st.session_state.class_designs:
-            selected_class = st.selectbox("Evaluate Class:", list(st.session_state.class_designs.keys()))
-            if st.button("Evaluate Design"):
-                evaluation = st.session_state.evaluator.evaluate_class_design(
-                    st.session_state.class_designs[selected_class]
+            # Batch evaluation button
+            if st.button("Evaluate ALL Class Designs", type="primary"):
+                batch_evals = st.session_state.evaluator.evaluate_class_designs(
+                    st.session_state.class_designs,
+                    requirements=st.session_state.requirements,
                 )
+                # Persist to DB
+                if st.session_state.get("current_problem"):
+                    for cls_name, eval_dict in batch_evals.items():
+                        db_helpers.save_evaluation(
+                            st.session_state.current_problem,
+                            cls_name,
+                            eval_dict,
+                        )
+                # Update session state
+                st.session_state.evaluations = batch_evals
 
-                # Display evaluation in a single-row layout using columns
-                st.metric("Design Score", f"{evaluation['overall_score']:.1f}/10")
+            # Display evaluations if present
+            if st.session_state.evaluations:
+                eval_items = list(st.session_state.evaluations.items())
+                cols = st.columns(len(eval_items))
 
-            for item in evaluation["feedback"]:
-                # Normalize to dict-like structure regardless of type
-                if isinstance(item, dict):
-                    level = item.get("level", "info")
-                    message = item.get("message", "")
-                elif hasattr(item, "level") and hasattr(item, "message"):
-                    # Pydantic BaseModel instance
-                    level = getattr(item, "level")
-                    message = getattr(item, "message")
-                elif isinstance(item, (list, tuple)) and len(item) >= 2:
-                    level, message = item[0], item[1]
-                else:
-                    level, message = "info", str(item)
+                for (cls_name, evaluation), col in zip(eval_items, cols):
+                    with col:
+                        st.markdown(f"### 📦 {cls_name}")
+                        st.metric("Score", f"{evaluation['overall_score']:.1f}/10")
 
-                level_lower = str(level).lower()
-                if level_lower in {"good", "success", "info"}:
-                    css = "evaluation-good"
-                elif level_lower in {"warning", "recommendation"}:
-                    css = "evaluation-warning"
-                elif level_lower in {"error", "critical"}:
-                    css = "evaluation-error"
-                else:
-                    css = "evaluation-warning"
+                        with st.expander("📝 Feedback"):
+                            for item in evaluation["feedback"]:
+                                if isinstance(item, dict):
+                                    level = item.get("level", "info"); message = item.get("message", "")
+                                elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                                    level, message = item[0], item[1]
+                                else:
+                                    level, message = "info", str(item)
 
-                st.markdown(f'<div class="{css}">{message}</div>', unsafe_allow_html=True)
-            if evaluation["suggestions"]:
-                st.markdown("**Suggestions:**")
-                for suggestion in evaluation["suggestions"]:
-                    st.write(f"💡 {suggestion}")
-            if evaluation["design_patterns"]:
-                st.markdown("**Identified Patterns:**")
-                for pattern in evaluation["design_patterns"]:
-                    st.write(f"🔧 {pattern}")
+                                level_lower = str(level).lower()
+                                if level_lower in {"good", "success", "info"}:
+                                    css = "evaluation-good"
+                                elif level_lower in {"warning", "recommendation"}:
+                                    css = "evaluation-warning"
+                                else:
+                                    css = "evaluation-error"
+
+                                st.markdown(f'<div class="{css}">{message}</div>', unsafe_allow_html=True)
+
+                        if evaluation["suggestions"]:
+                            with st.expander("💡 Suggestions"):
+                                for suggestion in evaluation["suggestions"]:
+                                    st.write(f"• {suggestion}")
 
     # ----------------------------------
     # Row 3: Tips and Designed Classes

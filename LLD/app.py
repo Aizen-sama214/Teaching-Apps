@@ -213,10 +213,19 @@ elif st.session_state.current_step == "design":
             selected_class = st.selectbox("Evaluate Class:", list(st.session_state.class_designs.keys()))
             
             if st.button("Evaluate Design"):
-                evaluation = st.session_state.evaluator.evaluate_class_design(
-                    st.session_state.class_designs[selected_class],
-                    requirements=st.session_state.requirements,
-                )
+                if not st.session_state.requirements.strip():
+                    st.warning("⚠️ Requirements have not been selected. Please define/select requirements first.")
+                    st.stop()
+                try:
+                    evaluation = st.session_state.evaluator.evaluate_class_design(
+                        st.session_state.class_designs[selected_class],
+                        requirements=st.session_state.requirements,
+                    )
+                except TypeError:
+                    # Fallback for older evaluator implementations without 'requirements' param
+                    evaluation = st.session_state.evaluator.evaluate_class_design(
+                        st.session_state.class_designs[selected_class]
+                    )
                 
                 # Display score
                 st.metric("Design Score", f"{evaluation['overall_score']:.1f}/10")

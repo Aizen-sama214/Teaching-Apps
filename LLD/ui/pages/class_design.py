@@ -21,6 +21,9 @@ def render() -> None:
         st.session_state.evaluations = db_helpers.fetch_evaluations(
             st.session_state.current_problem
         )
+        st.session_state.overall_design_evaluation = db_helpers.fetch_overall_design_evaluation(
+            st.session_state.current_problem
+        )
 
     # Force sections to stack vertically (override any global flex/grid)
     st.markdown(

@@ -90,12 +90,30 @@ def render() -> None:
                     st.session_state.class_designs[selected_class]
                 )
                 st.metric("Design Score", f"{evaluation['overall_score']:.1f}/10")
-                for feedback_type, message in evaluation["feedback"]:
-                    css = {
-                        "good": "evaluation-good",
-                        "warning": "evaluation-warning",
-                        "error": "evaluation-error",
-                    }[feedback_type]
+                for item in evaluation["feedback"]:
+                    # Normalize to dict-like structure regardless of type
+                    if isinstance(item, dict):
+                        level = item.get("level", "info")
+                        message = item.get("message", "")
+                    elif hasattr(item, "level") and hasattr(item, "message"):
+                        # Pydantic BaseModel instance
+                        level = getattr(item, "level")
+                        message = getattr(item, "message")
+                    elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                        level, message = item[0], item[1]
+                    else:
+                        level, message = "info", str(item)
+
+                    level_lower = str(level).lower()
+                    if level_lower in {"good", "success", "info"}:
+                        css = "evaluation-good"
+                    elif level_lower in {"warning", "recommendation"}:
+                        css = "evaluation-warning"
+                    elif level_lower in {"error", "critical"}:
+                        css = "evaluation-error"
+                    else:
+                        css = "evaluation-warning"
+
                     st.markdown(f'<div class="{css}">{message}</div>', unsafe_allow_html=True)
                 if evaluation["suggestions"]:
                     st.markdown("**Suggestions:**")

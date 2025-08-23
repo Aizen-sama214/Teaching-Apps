@@ -12,7 +12,22 @@ load_dotenv(dotenv_path=ROOT_DIR / ".env", override=False)
 import streamlit as st
 import json
 import re
+# Database & typing imports
 from typing import Dict, List, Any
+import logging
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    # Configure a basic handler if the application hasn't configured logging yet
+    logging.basicConfig(level=os.getenv("LOGLEVEL", "INFO"))
+
+# --- SQLite helpers ---
+from LLD import db as db_helpers
+
+# Initialize DB (creates tables on first run)
+db_helpers.init_db()
+
+# --- Load problem statements from DB ---
+PREDEFINED_REQUIREMENTS: Dict[str, str] = db_helpers.fetch_problems()
 
 from LLD.models import DesignPrinciple, ClassDesign
 from LLD.evaluator import DesignEvaluator
@@ -36,6 +51,8 @@ if "requirements" not in st.session_state:
     st.session_state.requirements = ""
 if "class_designs" not in st.session_state:
     st.session_state.class_designs = {}
+if "current_problem" not in st.session_state:
+    st.session_state.current_problem = ""
 if "evaluator" not in st.session_state:
     st.session_state.evaluator = DesignEvaluator()
 if "current_step" not in st.session_state:
@@ -50,11 +67,47 @@ st.session_state.current_step = navigation.select_step()
 # Requirements Section
 if st.session_state.current_step == "requirements":
     st.markdown('<div class="section-header">📋 Requirements</div>', unsafe_allow_html=True)
-    st.write("This section will be dedicated to defining the requirements for the system.")
-    # Placeholder for requirements input/display
-    st.session_state.requirements = st.text_area("Define Requirements:", value=st.session_state.requirements, height=200)
-    if st.button("Save Requirements"):
-        st.session_state.current_step = "design" # Move to design phase
+    st.write("Select a predefined design problem or input your own requirements.")
+
+    # Predefined problem selection
+    selected_problem = ""
+    if PREDEFINED_REQUIREMENTS:
+        problem_names = ["-- Select --"] + list(PREDEFINED_REQUIREMENTS.keys())
+        selected_problem = st.selectbox("Choose a predefined design problem:", problem_names, index=0)
+
+        if selected_problem not in ("", "-- Select --"):
+            if st.button("Load Predefined Requirements"):
+                st.session_state.requirements = PREDEFINED_REQUIREMENTS[selected_problem]
+                st.success(f"Loaded requirements for '{selected_problem}'! You can edit them below or proceed to the next step.")
+
+# Input field for problem name (for new or existing problems)
+    problem_name_input = st.text_input(
+        "Problem Name (for saving/updating in library):",
+        value=selected_problem if 'selected_problem' in locals() and selected_problem not in ("", "-- Select --") else "",
+        placeholder="e.g., Food Delivery App",
+    )
+
+    # Manual requirements input / edit area
+    st.session_state.requirements = st.text_area(
+        "Define Requirements:",
+        value=st.session_state.requirements,
+        height=300,
+    )
+
+    # --- Save & Continue Button ---
+    if st.button("Save & Continue", type="primary"):
+        name = problem_name_input.strip()
+        if name:
+            try:
+                db_helpers.save_problem(name, st.session_state.requirements)
+                st.success(f"Requirements for '{name}' saved to library.")
+                PREDEFINED_REQUIREMENTS[name] = st.session_state.requirements
+                st.session_state.current_problem = name
+            except Exception as e:
+                st.error(f"Failed to save to DB: {e}")
+
+        # Navigate to class design
+        st.session_state.current_step = "design"
         st.rerun()
 
 # Class Design Section
@@ -76,6 +129,10 @@ elif st.session_state.current_step == "design":
         st.markdown("**Design Your Classes:**")
         
         # Class selection/creation
+        # Refresh class designs from DB when entering design step
+        if st.session_state.current_problem:
+            st.session_state.class_designs = db_helpers.fetch_class_designs(st.session_state.current_problem)
+
         existing_classes = list(st.session_state.class_designs.keys())
         
         class_option = st.radio("Choose option:", ["Create New Class", "Edit Existing Class"])
@@ -141,6 +198,11 @@ elif st.session_state.current_step == "design":
                     relationships=[r.strip() for r in relationships.split('\n') if r.strip()]
                 )
                 st.session_state.class_designs[class_name] = class_design
+                # Persist to DB
+                try:
+                    db_helpers.save_class_design(st.session_state.current_problem, class_design)
+                except Exception as e:
+                    st.error(f"Failed to save to DB: {e}")
                 st.success(f"Class '{class_name}' saved successfully!")
                 st.rerun()
     
@@ -152,32 +214,50 @@ elif st.session_state.current_step == "design":
             
             if st.button("Evaluate Design"):
                 evaluation = st.session_state.evaluator.evaluate_class_design(
-                    st.session_state.class_designs[selected_class]
+                    st.session_state.class_designs[selected_class],
+                    requirements=st.session_state.requirements,
                 )
                 
                 # Display score
                 st.metric("Design Score", f"{evaluation['overall_score']:.1f}/10")
                 
-                # Display feedback
-                for feedback_type, message in evaluation["feedback"]:
-                    if feedback_type == "good":
-                        st.markdown(f'<div class="evaluation-good">{message}</div>', unsafe_allow_html=True)
-                    elif feedback_type == "warning":
-                        st.markdown(f'<div class="evaluation-warning">{message}</div>', unsafe_allow_html=True)
-                    else:
-                        st.markdown(f'<div class="evaluation-error">{message}</div>', unsafe_allow_html=True)
+                # -------------------- Collapsible Feedback --------------------
+                with st.expander("📝 Detailed Feedback"):
+                    for fb in evaluation["feedback"]:
+                        # Normalize diverse item types
+                        if isinstance(fb, dict):
+                            level = fb.get("level", "info")
+                            message = fb.get("message", "")
+                        elif hasattr(fb, "level") and hasattr(fb, "message"):
+                            level = getattr(fb, "level")
+                            message = getattr(fb, "message")
+                        elif isinstance(fb, (list, tuple)) and len(fb) >= 2:
+                            level, message = fb[0], fb[1]
+                        else:
+                            level, message = "info", str(fb)
+
+                        logger.info("Feedback type: %s, message: %s", level, message)
+
+                        level_lower = str(level).lower()
+                        if level_lower in {"good", "info", "success"}:
+                            css = "evaluation-good"
+                        elif level_lower in {"warning", "recommendation"}:
+                            css = "evaluation-warning"
+                        else:
+                            css = "evaluation-error"
+                        st.markdown(f'<div class="{css}">{message}</div>', unsafe_allow_html=True)
                 
-                # Suggestions
+                # -------------------- Collapsible Suggestions --------------------
                 if evaluation["suggestions"]:
-                    st.markdown("**Suggestions:**")
-                    for suggestion in evaluation["suggestions"]:
-                        st.write(f"💡 {suggestion}")
+                    with st.expander("💡 Suggestions"):
+                        for suggestion in evaluation["suggestions"]:
+                            st.write(f"💡 {suggestion}")
                 
-                # Design patterns
+                # -------------------- Collapsible Design Patterns --------------------
                 if evaluation["design_patterns"]:
-                    st.markdown("**Identified Patterns:**")
-                    for pattern in evaluation["design_patterns"]:
-                        st.write(f"🔧 {pattern}")
+                    with st.expander("🔧 Identified Patterns"):
+                        for pattern in evaluation["design_patterns"]:
+                            st.write(f"🔧 {pattern}")
         
         # Display existing classes
         if st.session_state.class_designs:
@@ -188,6 +268,16 @@ elif st.session_state.current_step == "design":
                     st.write(f"**Attributes:** {len(design.attributes)}")
                     st.write(f"**Methods:** {len(design.methods)}")
                     st.write(f"**Relationships:** {len(design.relationships)}")
+
+                    # Delete button
+                    if st.button(f"Delete '{name}'", key=f"del_{name}"):
+                        try:
+                            db_helpers.delete_class_design(st.session_state.current_problem, name)
+                            st.session_state.class_designs.pop(name, None)
+                            st.success(f"Deleted class '{name}'.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to delete: {e}")
 
 # Code Implementation Section
 elif st.session_state.current_step == "code":

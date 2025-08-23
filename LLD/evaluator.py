@@ -1,9 +1,18 @@
 from typing import Dict, List, Any, Tuple
-import os, json
+import os, json, logging
 from openai import OpenAI
 from pydantic import BaseModel
 
 from .models import DesignPrinciple, ClassDesign
+
+
+# ------------------------------------------------------------------
+# Module-level logger
+# ------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    # Configure a basic handler if the application hasn't configured logging yet
+    logging.basicConfig(level=os.getenv("LOGLEVEL", "INFO"))
 
 
 class DesignEvaluator:
@@ -30,7 +39,9 @@ class DesignEvaluator:
     # ---------------------------------------------------------------------
     # Public API
     # ---------------------------------------------------------------------
-    def evaluate_class_design(self, class_design: ClassDesign) -> Dict[str, Any]:
+    def evaluate_class_design(
+        self, class_design: ClassDesign, requirements: str | None = None
+    ) -> Dict[str, Any]:
         """Delegate evaluation to OpenAI and return a rich evaluation dictionary.
 
         The LLM is instructed to respond with JSON exactly matching the schema:
@@ -52,7 +63,7 @@ class DesignEvaluator:
             f"Relationships: {', '.join(class_design.relationships)}\n"
         )
 
-        system_msg = (
+        base_system_msg = (
             "You are an expert software design reviewer. "
             "Evaluate the given class design for adherence to SOLID principles, "
             "encapsulation, abstraction, and overall object-oriented quality. "
@@ -60,6 +71,13 @@ class DesignEvaluator:
             "{ 'overall_score': float 0-10, 'feedback': [[level, message], ...], "
             "'suggestions': [...], 'design_patterns': [...] } without code-block markdown."
         )
+
+        # Append the high-level problem requirements (if provided) so the model can
+        # judge the class design in the correct context.
+        if requirements:
+            base_system_msg += f"\n\nProblem Requirements:\n{requirements.strip()}"
+
+        system_msg = base_system_msg
 
         messages = [
             {"role": "system", "content": system_msg},
@@ -84,7 +102,16 @@ class DesignEvaluator:
                 input=messages,
                 text_format=_EvalSchema,
             )
+            logger.info(f"Parsed response: {parsed_resp}")
+
             evaluation: Dict[str, Any] = parsed_resp.output_parsed.dict()
+            # Detect placeholder feedback (e.g., repeated literal 'message') and treat as invalid
+            placeholder_detected = all(
+                isinstance(item, dict) and item.get("message", "").strip().lower() == "message"
+                for item in evaluation.get("feedback", [])
+            )
+            if placeholder_detected or not evaluation.get("feedback"):
+                raise ValueError("LLM returned placeholder feedback")
         except Exception as exc:
             # Fallback: return minimal structure with error notification
             evaluation = {
@@ -93,6 +120,14 @@ class DesignEvaluator:
                 "suggestions": [],
                 "design_patterns": [],
             }
+
+        # If we still have placeholder feedback or overall_score == 0, use internal heuristic evaluator
+        if evaluation.get("overall_score", 0) == 0 or all(
+            (isinstance(item, (list, tuple)) and item[1].strip().lower() == "message")
+            or (isinstance(item, dict) and item.get("message", "").strip().lower() == "message")
+            for item in evaluation.get("feedback", [])
+        ):
+            evaluation = self._internal_evaluate(class_design)
 
         return evaluation
 
@@ -162,6 +197,26 @@ class DesignEvaluator:
     # ------------------------------------------------------------------
     # Auxiliary helpers
     # ------------------------------------------------------------------
+    def _internal_evaluate(self, class_design: ClassDesign) -> Dict[str, Any]:
+        """Heuristic evaluation used as fallback when LLM response is invalid."""
+        srp_score, srp_feedback = self._evaluate_srp(class_design)
+        enc_score, enc_feedback = self._evaluate_encapsulation(class_design)
+        abs_score, abs_feedback = self._evaluate_abstraction(class_design)
+
+        total_score = srp_score + enc_score + abs_score  # Max 30
+        overall = round((total_score / 30) * 10, 1)
+
+        feedback = srp_feedback + enc_feedback + abs_feedback
+        suggestions = self._generate_suggestions(class_design)
+        patterns = self._identify_patterns(class_design)
+
+        return {
+            "overall_score": overall,
+            "feedback": feedback,
+            "suggestions": suggestions,
+            "design_patterns": patterns,
+        }
+
     @staticmethod
     def _generate_suggestions(class_design: ClassDesign) -> List[str]:
         suggestions: List[str] = []

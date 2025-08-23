@@ -76,6 +76,15 @@ CREATE TABLE IF NOT EXISTS evaluations (
     UNIQUE(class_id),
     FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS overall_design_evaluations (
+    problem_id      INTEGER PRIMARY KEY,  -- one row per problem
+    overall_score   REAL NOT NULL,
+    feedback        TEXT NOT NULL,
+    missing_classes TEXT NOT NULL,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(problem_id) REFERENCES problems(id) ON DELETE CASCADE
+);
 """
 
 MIGRATIONS: list[str] = [
@@ -85,6 +94,8 @@ MIGRATIONS: list[str] = [
     "CREATE TABLE IF NOT EXISTS code_implementations (\n        id            INTEGER PRIMARY KEY AUTOINCREMENT,\n        class_id      INTEGER NOT NULL UNIQUE,\n        code          TEXT NOT NULL,\n        analysis      TEXT NOT NULL,\n        updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n        FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE\n    );",
     # Ensure implementation_evaluations table exists
     "CREATE TABLE IF NOT EXISTS implementation_evaluations (\n        id            INTEGER PRIMARY KEY AUTOINCREMENT,\n        class_id      INTEGER NOT NULL UNIQUE,\n        overall_score REAL NOT NULL,\n        feedback      TEXT NOT NULL,\n        suggestions   TEXT NOT NULL,\n        design_patterns TEXT NOT NULL,\n        updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n        FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE\n    );",
+    # Ensure overall_design_evaluations table exists
+    "CREATE TABLE IF NOT EXISTS overall_design_evaluations (\n        problem_id      INTEGER PRIMARY KEY,\n        overall_score   REAL NOT NULL,\n        feedback        TEXT NOT NULL,\n        missing_classes TEXT NOT NULL,\n        updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n        FOREIGN KEY(problem_id) REFERENCES problems(id) ON DELETE CASCADE\n    );",
 ]
 
 
@@ -354,6 +365,51 @@ def fetch_implementation_evaluations(problem_name: str) -> Dict[str, Dict[str, A
     }
 
 
+# -----------------------------------------------------------------------------
+# Overall design evaluation helpers
+# -----------------------------------------------------------------------------
+
+def save_overall_design_evaluation(
+    problem_name: str,
+    evaluation: Dict[str, Any],
+) -> None:  # noqa: D401
+    """Persist an overall design evaluation for a given problem."""
+
+    with _get_conn() as conn:
+        pid = _problem_id(conn, problem_name)
+        conn.execute(
+            "INSERT INTO overall_design_evaluations (problem_id, overall_score, feedback, missing_classes) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(problem_id) DO UPDATE SET overall_score = excluded.overall_score, "
+            "feedback = excluded.feedback, missing_classes = excluded.missing_classes, "
+            "updated_at = CURRENT_TIMESTAMP;",
+            (
+                pid,
+                evaluation.get("overall_score", 0),
+                json.dumps(evaluation.get("feedback", [])),
+                json.dumps(evaluation.get("missing_classes", [])),
+            ),
+        )
+
+
+def fetch_overall_design_evaluation(problem_name: str) -> Dict[str, Any] | None:
+    """Fetch overall design evaluation for a problem, if present."""
+
+    with _get_conn() as conn:
+        pid = _problem_id(conn, problem_name)
+        row = conn.execute(
+            "SELECT overall_score, feedback, missing_classes FROM overall_design_evaluations WHERE problem_id = ?;",
+            (pid,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "overall_score": row["overall_score"],
+        "feedback": json.loads(row["feedback"]),
+        "missing_classes": json.loads(row["missing_classes"]),
+    }
+
+
 # Export public symbols -------------------------------------------------------
 
 __all__ = [
@@ -370,4 +426,6 @@ __all__ = [
     "fetch_code_implementations",
     "save_implementation_evaluation",
     "fetch_implementation_evaluations",
+    "save_overall_design_evaluation",
+    "fetch_overall_design_evaluation",
 ]

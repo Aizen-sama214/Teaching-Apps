@@ -54,12 +54,15 @@ def render() -> None:
     # Row 1: Class design input (Create / Edit)
     # ----------------------------------
 
-    st.markdown("### 🛠️ Design Your Classes")
+    # Allocate ~40% width to the design form and ~60% to evaluations
+    design_col, eval_col = st.columns([2, 3])
 
-    # Create an outer layout – 20% for class design form, 80% for evaluation.
-    design_col, eval_col = st.columns([1, 4])
+    # -------------------------------------------------
+    # Left Column: Design Your Classes Section
+    # -------------------------------------------------
 
     with design_col:
+        st.markdown("### 🛠️ Design Your Classes")
         existing_classes = list(st.session_state.class_designs.keys())
         class_option = st.radio("Choose option:", ["Create New Class", "Edit Existing Class"])
 
@@ -134,7 +137,7 @@ def render() -> None:
         if st.session_state.class_designs:
             # Batch evaluation button
             if st.button("Evaluate ALL Class Designs", type="primary"):
-                batch_evals = st.session_state.evaluator.evaluate_class_designs(
+                batch_evals, overall_eval = st.session_state.evaluator.evaluate_class_designs(
                     st.session_state.class_designs,
                     requirements=st.session_state.requirements,
                 )
@@ -146,42 +149,86 @@ def render() -> None:
                             cls_name,
                             eval_dict,
                         )
+                    db_helpers.save_overall_design_evaluation(
+                        st.session_state.current_problem,
+                        overall_eval,
+                    )
                 # Update session state
                 st.session_state.evaluations = batch_evals
+                st.session_state.overall_design_evaluation = overall_eval
 
             # Display evaluations if present
             if st.session_state.evaluations:
-                eval_items = list(st.session_state.evaluations.items())
-                cols = st.columns(len(eval_items))
+                # ---- Add scrollable container around all evaluations ----
+                st.markdown(
+                    """
+                    <style>
+                    .eval-scroll {
+                        max-height: 550px; /* adjust as needed */
+                        overflow-y: auto;
+                        padding-right: 0.5rem;
+                    }
+                    /* Hide default extra separators created previously */
+                    .eval-scroll hr { display: none; }
+                    </style>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
-                for (cls_name, evaluation), col in zip(eval_items, cols):
-                    with col:
-                        st.markdown(f"### 📦 {cls_name}")
-                        st.metric("Score", f"{evaluation['overall_score']:.1f}/10")
+                st.markdown('<div class="eval-scroll">', unsafe_allow_html=True)
 
-                        with st.expander("📝 Feedback"):
-                            for item in evaluation["feedback"]:
-                                if isinstance(item, dict):
-                                    level = item.get("level", "info"); message = item.get("message", "")
-                                elif isinstance(item, (list, tuple)) and len(item) >= 2:
-                                    level, message = item[0], item[1]
-                                else:
-                                    level, message = "info", str(item)
+                # Display each evaluation as a simple expander stacked vertically
+                for cls_name, evaluation in st.session_state.evaluations.items():
+                    with st.expander(f"📦 {cls_name} — {evaluation['overall_score']:.1f}/10"):
 
-                                level_lower = str(level).lower()
-                                if level_lower in {"good", "success", "info"}:
-                                    css = "evaluation-good"
-                                elif level_lower in {"warning", "recommendation"}:
-                                    css = "evaluation-warning"
-                                else:
-                                    css = "evaluation-error"
+                        # -------------------- Feedback --------------------
+                        st.markdown("#### 📝 Feedback")
+                        for item in evaluation["feedback"]:
+                            if isinstance(item, dict):
+                                level = item.get("level", "info"); message = item.get("message", "")
+                            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                                level, message = item[0], item[1]
+                            else:
+                                level, message = "info", str(item)
 
-                                st.markdown(f'<div class="{css}">{message}</div>', unsafe_allow_html=True)
+                            level_lower = str(level).lower()
+                            if level_lower in {"good", "success", "info"}:
+                                css = "evaluation-good"
+                            elif level_lower in {"warning", "recommendation"}:
+                                css = "evaluation-warning"
+                            else:
+                                css = "evaluation-error"
 
+                            st.markdown(f'<div class="{css}">{message}</div>', unsafe_allow_html=True)
+
+                        # -------------------- Suggestions --------------------
                         if evaluation["suggestions"]:
-                            with st.expander("💡 Suggestions"):
-                                for suggestion in evaluation["suggestions"]:
-                                    st.write(f"• {suggestion}")
+                            st.markdown("#### 💡 Suggestions")
+                            for suggestion in evaluation["suggestions"]:
+                                st.write(f"• {suggestion}")
+
+                # Display overall design evaluation --------------------------------
+                overall_eval = st.session_state.get("overall_design_evaluation")
+                if overall_eval:
+                    with st.expander(f"🧩 Overall Design Review — {overall_eval['overall_score']:.1f}/10"):
+                        st.markdown("#### 📝 Feedback")
+                        for level, message in overall_eval["feedback"]:
+                            level_lower = str(level).lower()
+                            if level_lower in {"good", "success", "info"}:
+                                css = "evaluation-good"
+                            elif level_lower in {"warning", "recommendation"}:
+                                css = "evaluation-warning"
+                            else:
+                                css = "evaluation-error"
+                            st.markdown(f'<div class="{css}">{message}</div>', unsafe_allow_html=True)
+
+                        if overall_eval.get("missing_classes"):
+                            st.markdown("#### ❗ Missing Classes")
+                            for cls in overall_eval["missing_classes"]:
+                                st.write(f"• {cls}")
+
+                # close scrollable div
+                st.markdown('</div>', unsafe_allow_html=True)
 
     # ----------------------------------
     # Row 3: Tips and Designed Classes

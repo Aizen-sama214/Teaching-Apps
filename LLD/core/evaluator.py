@@ -37,14 +37,14 @@ class DesignEvaluator:  # noqa: WPS230 (large class acceptable)
         self,
         class_designs: Dict[str, ClassDesign],
         requirements: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Evaluate multiple class designs in one LLM request.
 
         Falls back to individual evaluation when parsing fails.
         """
 
         if not class_designs:
-            return {}
+            return {}, {}
 
         # Build aggregated description
         description_parts: list[str] = []
@@ -65,7 +65,8 @@ class DesignEvaluator:  # noqa: WPS230 (large class acceptable)
             "Evaluate each of the following class designs for adherence to SOLID principles, clarity of responsibilities, coupling/cohesion and overall design quality. "
             "Respond ONLY with valid JSON mapping class names to their evaluation. Each value must include 'overall_score', 'feedback', 'suggestions'. "
             "For the field 'feedback', provide a list of tuples, where the first element is the level of the feedback and the second element is the message. "
-            "The field 'suggestions' should be a list of strings, where each string is a suggestion for the class."
+            "The field 'suggestions' should be a list of strings, where each string is a suggestion for the class. "
+            "Additionally, include a top-level key named 'overall_evaluation' whose value is an object with keys 'overall_score', 'feedback', and 'missing_classes' (list of class names that seem required but are absent). "
             "Do not include any markdown code fences or extra keys in the response. "
         )
         if requirements:
@@ -88,7 +89,10 @@ class DesignEvaluator:  # noqa: WPS230 (large class acceptable)
             # Ensure all classes present
             if not all(name in evaluations for name in class_designs):
                 raise ValueError("Missing class evaluations in response")
-            return evaluations
+            if "overall_evaluation" not in evaluations:
+                raise ValueError("Missing overall evaluation in response")
+            overall_eval = evaluations.pop("overall_evaluation")
+            return evaluations, overall_eval
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Batch design evaluation failed (%s). Returning error stubs.", exc,
@@ -100,6 +104,10 @@ class DesignEvaluator:  # noqa: WPS230 (large class acceptable)
                     "suggestions": [],
                 }
                 for name in class_designs
+            }, {
+                "overall_score": 0,
+                "feedback": [("error", f"Failed to evaluate due to: {exc}")],
+                "missing_classes": [],
             }
 
     # ------------------------------------------------------------------

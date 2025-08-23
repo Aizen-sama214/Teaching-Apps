@@ -57,6 +57,8 @@ if "evaluator" not in st.session_state:
     st.session_state.evaluator = DesignEvaluator()
 if "current_step" not in st.session_state:
     st.session_state.current_step = "requirements"
+if "evaluations" not in st.session_state:
+    st.session_state.evaluations = {}
 
 # Main header
 st.markdown('<h1 class="main-header">🏗️ Low Level Design Learning Platform</h1>', unsafe_allow_html=True)
@@ -122,8 +124,8 @@ elif st.session_state.current_step == "design":
     with st.expander("📋 View Requirements"):
         st.write(st.session_state.requirements)
     
-    # Class design input
-    col1, col2 = st.columns([3, 2])
+    # Class design input – give "Design Classes" only 20% width and Evaluation 80%
+    col1, col2 = st.columns([1, 4])
     
     with col1:
         st.markdown("**Design Your Classes:**")
@@ -132,6 +134,7 @@ elif st.session_state.current_step == "design":
         # Refresh class designs from DB when entering design step
         if st.session_state.current_problem:
             st.session_state.class_designs = db_helpers.fetch_class_designs(st.session_state.current_problem)
+            st.session_state.evaluations = db_helpers.fetch_evaluations(st.session_state.current_problem)
 
         existing_classes = list(st.session_state.class_designs.keys())
         
@@ -208,75 +211,84 @@ elif st.session_state.current_step == "design":
     
     with col2:
         st.markdown("**Design Evaluation:**")
-        
+
         if st.session_state.class_designs:
-            selected_class = st.selectbox("Evaluate Class:", list(st.session_state.class_designs.keys()))
-            
-            if st.button("Evaluate Design"):
+            if st.button("Evaluate All Designs"):
                 if not st.session_state.requirements.strip():
                     st.warning("⚠️ Requirements have not been selected. Please define/select requirements first.")
                     st.stop()
+
+                # Attempt batch evaluation (requires updated evaluator)
                 try:
-                    evaluation = st.session_state.evaluator.evaluate_class_design(
-                        st.session_state.class_designs[selected_class],
+                    evaluations = st.session_state.evaluator.evaluate_class_designs(
+                        st.session_state.class_designs,
                         requirements=st.session_state.requirements,
                     )
-                except TypeError:
-                    # Fallback for older evaluator implementations without 'requirements' param
-                    evaluation = st.session_state.evaluator.evaluate_class_design(
-                        st.session_state.class_designs[selected_class]
-                    )
-                
-                # Display score
-                st.metric("Design Score", f"{evaluation['overall_score']:.1f}/10")
-                
-                # -------------------- Collapsible Feedback --------------------
-                with st.expander("📝 Detailed Feedback"):
-                    for fb in evaluation["feedback"]:
-                        # Normalize diverse item types
-                        if isinstance(fb, dict):
-                            level = fb.get("level", "info")
-                            message = fb.get("message", "")
-                        elif hasattr(fb, "level") and hasattr(fb, "message"):
-                            level = getattr(fb, "level")
-                            message = getattr(fb, "message")
-                        elif isinstance(fb, (list, tuple)) and len(fb) >= 2:
-                            level, message = fb[0], fb[1]
-                        else:
-                            level, message = "info", str(fb)
+                except AttributeError:
+                    # Fallback for older evaluator versions – evaluate individually
+                    evaluations = {}
+                    for cls_name, cls_design in st.session_state.class_designs.items():
+                        evaluations[cls_name] = st.session_state.evaluator.evaluate_class_design(
+                            cls_design,
+                            requirements=st.session_state.requirements,
+                        )
+                # Persist and update session state
+                st.session_state.evaluations = evaluations
+                try:
+                    for cls_name, eval_dict in evaluations.items():
+                        db_helpers.save_evaluation(st.session_state.current_problem, cls_name, eval_dict)
+                except Exception as e:
+                    st.error(f"Failed to save evaluations: {e}")
 
-                        logger.info("Feedback type: %s, message: %s", level, message)
-
-                        level_lower = str(level).lower()
-                        if level_lower in {"good", "info", "success"}:
-                            css = "evaluation-good"
-                        elif level_lower in {"warning", "recommendation"}:
-                            css = "evaluation-warning"
-                        else:
-                            css = "evaluation-error"
-                        st.markdown(f'<div class="{css}">{message}</div>', unsafe_allow_html=True)
-                
-                # -------------------- Collapsible Suggestions --------------------
-                if evaluation["suggestions"]:
-                    with st.expander("💡 Suggestions"):
-                        for suggestion in evaluation["suggestions"]:
-                            st.write(f"💡 {suggestion}")
-                
-                # -------------------- Collapsible Design Patterns --------------------
-                if evaluation["design_patterns"]:
-                    with st.expander("🔧 Identified Patterns"):
-                        for pattern in evaluation["design_patterns"]:
-                            st.write(f"🔧 {pattern}")
+        # After evaluation (or if evaluations already exist), render results
+        if st.session_state.get("evaluations"):
+            eval_items = list(st.session_state.evaluations.items())
+            eval_cols = st.columns(len(eval_items))
+            for (cls_name, evaluation), col in zip(eval_items, eval_cols):
+                with col:
+                    display_name = evaluation.get("class_name", cls_name) if isinstance(evaluation, dict) else cls_name
+                    st.markdown(f"### 📦 **{display_name}**")
+                    st.metric("Design Score", f"{evaluation['overall_score']:.1f}/10")
+                    # Feedback, suggestions, patterns as earlier code (refactor into function?)
+                    with st.expander("📝 Detailed Feedback", expanded=False):
+                        for fb in evaluation["feedback"]:
+                            if isinstance(fb, dict):
+                                level = fb.get("level", "info"); message = fb.get("message", "")
+                            elif hasattr(fb, "level") and hasattr(fb, "message"):
+                                level = getattr(fb, "level"); message = getattr(fb, "message")
+                            elif isinstance(fb, (list, tuple)) and len(fb) >= 2:
+                                level, message = fb[0], fb[1]
+                            else:
+                                level, message = "info", str(fb)
+                            level_lower = str(level).lower()
+                            if level_lower in {"good", "info", "success"}:
+                                css = "evaluation-good"
+                            elif level_lower in {"warning", "recommendation"}:
+                                css = "evaluation-warning"
+                            else:
+                                css = "evaluation-error"
+                            st.markdown(f'<div class="{css}">{message}</div>', unsafe_allow_html=True)
+                    if evaluation["suggestions"]:
+                        with st.expander("💡 Suggestions", expanded=False):
+                            for suggestion in evaluation["suggestions"]:
+                                st.write(f"💡 {suggestion}")
+                    if evaluation["design_patterns"]:
+                        with st.expander("🔧 Identified Patterns", expanded=False):
+                            for pattern in evaluation["design_patterns"]:
+                                st.write(f"🔧 {pattern}")
         
         # Display existing classes
         if st.session_state.class_designs:
             st.markdown("**Designed Classes:**")
-            for name, design in st.session_state.class_designs.items():
-                with st.expander(f"📦 {name}"):
-                    st.write(f"**Responsibilities:** {len(design.responsibilities)}")
-                    st.write(f"**Attributes:** {len(design.attributes)}")
-                    st.write(f"**Methods:** {len(design.methods)}")
-                    st.write(f"**Relationships:** {len(design.relationships)}")
+            class_items = list(st.session_state.class_designs.items())
+            class_cols = st.columns(len(class_items))
+            for (name, design), col in zip(class_items, class_cols):
+                with col:
+                    with st.expander(f"📦 {name}"):
+                        st.write(f"**Responsibilities:** {len(design.responsibilities)}")
+                        st.write(f"**Attributes:** {len(design.attributes)}")
+                        st.write(f"**Methods:** {len(design.methods)}")
+                        st.write(f"**Relationships:** {len(design.relationships)}")
 
                     # Delete button
                     if st.button(f"Delete '{name}'", key=f"del_{name}"):

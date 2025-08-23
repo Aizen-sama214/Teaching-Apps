@@ -2,7 +2,7 @@ import sqlite3
 import json
 import pathlib
 from contextlib import contextmanager
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 from .models import ClassDesign
 
@@ -43,6 +43,18 @@ CREATE TABLE IF NOT EXISTS classes (
     relationships   TEXT NOT NULL,
     UNIQUE(name, problem_id),
     FOREIGN KEY(problem_id) REFERENCES problems(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS evaluations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    class_id      INTEGER NOT NULL,
+    overall_score REAL NOT NULL,
+    feedback      TEXT NOT NULL,
+    suggestions   TEXT NOT NULL,
+    design_patterns TEXT NOT NULL,
+    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(class_id),
+    FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE
 );
 """
 
@@ -135,3 +147,61 @@ def fetch_class_designs(problem_name: str) -> Dict[str, ClassDesign]:
             relationships=json.loads(row["relationships"]),
         )
     return designs
+
+# -----------------------------------------------------------------------------
+# Evaluation helpers
+# -----------------------------------------------------------------------------
+
+def _class_id(conn: sqlite3.Connection, problem_name: str, class_name: str) -> int:
+    """Return the row id of a class for a given problem. Raises if not found."""
+    pid = _problem_id(conn, problem_name)
+    row = conn.execute(
+        "SELECT id FROM classes WHERE problem_id = ? AND name = ?;",
+        (pid, class_name.strip()),
+    ).fetchone()
+    if not row:
+        raise ValueError(f"Class '{class_name}' for problem '{problem_name}' does not exist.")
+    return int(row["id"])
+
+def save_evaluation(problem_name: str, class_name: str, evaluation: Dict[str, Any]) -> None:
+    """Insert or update an evaluation for a particular class design."""
+    import json as _json
+
+    with _get_conn() as conn:
+        cid = _class_id(conn, problem_name, class_name)
+        conn.execute(
+            "INSERT INTO evaluations (class_id, overall_score, feedback, suggestions, design_patterns) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(class_id) DO UPDATE SET overall_score = excluded.overall_score, "
+            "feedback = excluded.feedback, suggestions = excluded.suggestions, "
+            "design_patterns = excluded.design_patterns, updated_at = CURRENT_TIMESTAMP;",
+            (
+                cid,
+                evaluation.get("overall_score", 0),
+                _json.dumps(evaluation.get("feedback", [])),
+                _json.dumps(evaluation.get("suggestions", [])),
+                _json.dumps(evaluation.get("design_patterns", [])),
+            ),
+        )
+
+def fetch_evaluations(problem_name: str) -> Dict[str, Dict[str, Any]]:
+    """Return mapping class_name -> evaluation dict for a problem."""
+    import json as _json
+
+    with _get_conn() as conn:
+        pid = _problem_id(conn, problem_name)
+        rows = conn.execute(
+            "SELECT c.name as class_name, e.overall_score, e.feedback, e.suggestions, e.design_patterns "
+            "FROM evaluations e JOIN classes c ON e.class_id = c.id "
+            "WHERE c.problem_id = ?;",
+            (pid,),
+        ).fetchall()
+    evaluations: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        evaluations[row["class_name"]] = {
+            "overall_score": row["overall_score"],
+            "feedback": _json.loads(row["feedback"]),
+            "suggestions": _json.loads(row["suggestions"]),
+            "design_patterns": _json.loads(row["design_patterns"]),
+        }
+    return evaluations

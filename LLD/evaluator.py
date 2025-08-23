@@ -240,3 +240,81 @@ class DesignEvaluator:
         if "builder" in class_design.name.lower():
             patterns.append("Builder Pattern")
         return patterns
+
+    # ------------------------------------------------------------------
+    # New public helper – batch evaluation
+    # ------------------------------------------------------------------
+    def evaluate_class_designs(
+        self,
+        class_designs: Dict[str, "ClassDesign"],  # type: ignore  # forward ref
+        requirements: str | None = None,
+    ) -> Dict[str, Any]:
+        """Evaluate multiple class designs in *one* LLM request.
+
+        The LLM is instructed to return a JSON object where each key is the
+        class name and each value follows the single-class schema used by
+        :py:meth:`evaluate_class_design`.
+
+        A best-effort JSON parse is attempted; if it fails, the method falls
+        back to evaluating each class individually.
+        """
+
+        # Short-circuit empty call
+        if not class_designs:
+            return {}
+
+        # Build aggregated description for the user message
+        description_parts: List[str] = []
+        for name, cd in class_designs.items():
+            part = (
+                f"Class Name: {cd.name}\n"
+                f"Responsibilities: {', '.join(cd.responsibilities)}\n"
+                f"Attributes: {', '.join(cd.attributes)}\n"
+                f"Methods: {', '.join(cd.methods)}\n"
+                f"Relationships: {', '.join(cd.relationships)}"
+            )
+            description_parts.append(part)
+
+        batched_description = "\n\n---\n\n".join(description_parts)
+
+        # System message adapts the schema hint for multiple classes
+        system_msg = (
+            "You are an expert software design reviewer. "
+            "Evaluate each of the following class designs for adherence to SOLID principles, "
+            "encapsulation, abstraction, and overall OO quality. "
+            "Respond ONLY with valid JSON mapping class names to their evaluation results. "
+            "Each value must be an object that includes its own 'class_name' field plus: "
+            "{ 'class_name': str, 'overall_score': float 0-10, 'feedback': [[level, message], ...], "
+            "'suggestions': [...], 'design_patterns': [...] }. "
+            "Do NOT wrap the JSON in markdown."
+        )
+
+        # Include requirements context if provided
+        if requirements:
+            system_msg += f"\n\nProblem Requirements:\n{requirements.strip()}"
+
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": batched_description},
+        ]
+
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model_name,
+                temperature=self.temperature,
+                messages=messages,
+            )
+            content = resp.choices[0].message.content.strip()
+            evaluations = json.loads(content)
+
+            # Basic sanity check – ensure keys match provided classes
+            if not all(name in evaluations for name in class_designs):
+                raise ValueError("Response missing some class evaluations")
+            return evaluations
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Batch evaluation failed (%s). Falling back to individual calls.", exc)
+            # Fallback – evaluate individually using existing method
+            return {
+                name: self.evaluate_class_design(cd, requirements=requirements)
+                for name, cd in class_designs.items()
+            }
